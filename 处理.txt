@@ -1,0 +1,31 @@
+value.trim().replace(" ","") 去空格
+
+^\d+(\.\d+)?$ 匹配纯数字
+
+if(value.contains("–"), (toNumber(value.split("–")[0].trim()) + toNumber(value.split("–")[1].trim())) / 2,
+  if(value.contains("—"), (toNumber(value.split("—")[0].trim()) + toNumber(value.split("—")[1].trim())) / 2,
+    if(value.contains("−"), (toNumber(value.split("−")[0].trim()) + toNumber(value.split("−")[1].trim())) / 2,
+      if(value.contains("-"), (toNumber(value.split("-")[0].trim()) + toNumber(value.split("-")[1].trim())) / 2,
+        value
+      )
+    )
+  )
+)
+处理均值
+
+value.toString().trim().replace(/\（.*?\）|\(.*?\)/,"").replace(/(?i)MPa/,"").replace(/[><=~≈≥≤＞＜]/,"").replace(/\s+/,"")
+处理大于号、MPa等
+
+value.toString().replace(/(\d+(?:\.\d+)?)(?:±\d+(?:\.\d+)?)?/, "$1")
+处理±
+
+if(value==null, null,
+  if(value.toString().trim().toLowercase().replace(".","").replace(" ","").replace("-","").replace("·","").replace(",","").contains("ksi"),
+    if(toNumber(value.toString().trim().toLowercase().replace(".","").replace(" ","").replace("-","").replace("·","").replace(",","").replace("ksi",""))==null,
+      value,
+      round(toNumber(value.toString().trim().toLowercase().replace(".","").replace(" ","").replace("-","").replace("·","").replace(",","").replace("ksi",""))*6.895*10)/10
+    ),
+    value
+  )
+)
+处理ksi

@@ -1,0 +1,272 @@
+﻿<!DOCTYPE html>
+<!-- encoding: UTF-8; 请以 UTF-8 保存本文件，避免使用会破坏编码的批量替换工具编辑中文内容 -->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>精准检索</title>
+  <script>
+    (function(){
+      try{
+        var k='dm-app-theme';
+        var t=localStorage.getItem(k)||'titanium';
+        document.documentElement.className=t;
+      }catch(e){}
+    })();
+  </script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
+  <style>
+    .condition{ display:flex; gap:8px; align-items:flex-start; position:relative; margin-top:8px; }
+    .prop-cell{ min-width:220px; display:flex; flex-direction:column; align-items:flex-start; gap:4px; }
+    .range-hint{ color: var(--danger); font-size:12px; font-weight:700; line-height:1.2; display:block; margin-top:4px; max-width:40ch; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .error{ position:absolute; background:#ffeded; border:1px solid #ffb3b3; color:#b00020; padding:4px 8px; border-radius:6px; font-size:12px; display:none; }
+  </style>
+  <style>
+    /* minimal layout hooks (kept as-is) */
+  </style>
+  <!-- zh text is intentionally UTF-8 -->
+</head>
+<body>
+  <header>
+    <button class="btn theme-btn" id="themeBtn" onclick="toggleTheme()">切换主题</button>
+    <h2>精准检索</h2>
+    <div class="db-switcher">
+      <select id="dbSelect" class="db-select" onchange="onDbSelectChange(this)">
+        <option value="main">主数据库</option>
+        <option value="user">用户数据库</option>
+        <option value="upload">上传XLSX数据</option>
+      </select>
+      <input id="dbUpload" type="file" accept=".xlsx,.xls" style="display:none" />
+    </div>
+  </header>
+
+  <div class="layout">
+    <div id="container">
+      <div id="conditions"></div>
+      <div class="buttons-row">
+        <button class="btn btn-primary" onclick="addCondition()">+ 添加条件</button>
+        <button class="btn btn-primary" id="searchBtn" onclick="search()">搜索</button>
+        <button class="btn" id="colBtn" onclick="openColumnModal()">列设置</button>
+      </div>
+      <table id="results"></table>
+      <div id="pagination" class="pagination"></div>
+    </div>
+
+    <aside class="sidepanel" id="sidepanel">
+      <h3 class="title">概览</h3>
+      <div id="panelSummary" class="muted">加载中…</div>
+      <div class="panel-section">
+        <div class="detail-head">
+          <div id="detailTitle" class="detail-title">未选择条目</div>
+          <div class="detail-tools">
+            <button class="copy-btn" onclick="copyDetail(this)">复制JSON</button>
+          </div>
+        </div>
+        <input id="fieldFilter" class="field-filter" placeholder="筛选字段名或值…" oninput="renderDetailsFiltered()" />
+        <div id="detailGrid" class="kv-grid" style="margin-top:8px"></div>
+      </div>
+    </aside>
+  </div>
+
+  <div id="candidatesPanel" class="candidates-panel" aria-label="候选区">
+    <div class="cand-header">
+      <div class="cand-title">候选区</div>
+      <div class="cand-tools">
+        <span id="candCount" class="muted">0 项</span>
+        <button class="icon-btn" onclick="exportCandidates()">导出XLSX</button>
+        <button class="icon-btn" onclick="clearCandidates()">清空</button>
+      </div>
+    </div>
+    <div id="candList" class="cand-list muted">暂无候选，点击“候选”按钮收集条目</div>
+  </div>
+
+  <div id="colModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="colModalTitle">
+    <div class="modal-header">
+      <div id="colModalTitle">列设置</div>
+      <button class="icon-btn" onclick="closeColumnModal()">关闭</button>
+    </div>
+    <div class="modal-body">
+      <div class="muted" style="margin-bottom:8px">固定列：id, name</div>
+      <div id="columnsList" class="columns-list"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="selectAllColumns(true)">全选</button>
+      <button class="btn" onclick="selectAllColumns(false)">全不选</button>
+      <button class="btn btn-primary" onclick="applyColumnSelection()">应用</button>
+    </div>
+  </div>
+  <div id="colModalOverlay" class="modal-overlay" onclick="closeColumnModal()"></div>
+
+  <script>
+  let properties = {};
+  let conditionCount = 0;
+  let usedProperties = new Set();
+  let selectedProperties = [];
+  let allColumns = [];
+  let visibleColumns = new Set();
+  let lastData = [];
+  let candidates = [];
+  let currentDb = 'main';
+  let currentPage = 1;
+  let pageSize = 20;
+  let selectedRowId = null;
+  let dbTotal = null;
+  let lastSearchId = 0;
+
+  async function loadProperties(){
+    const res = await fetch('/properties');
+    properties = await res.json();
+    addCondition();
+    try{
+      const s = await fetch('/stats'); const sj = await s.json(); dbTotal = sj.total;
+      updatePanelSummary();
+    }catch(e){ dbTotal = null; updatePanelSummary(); }
+    try{
+      const st = await fetch('/db/options'); const sj = await st.json();
+      currentDb = sj.current || 'main';
+      const sel = document.getElementById('dbSelect'); if(sel) sel.value=currentDb;
+    }catch(e){}
+  }
+
+  function addCondition(){
+    conditionCount++;
+    const availableProps = Object.keys(properties).filter(p=>!usedProperties.has(p));
+    if(availableProps.length===0){ alert('所有属性已选择'); return; }
+    const div = document.createElement('div');
+    div.className='condition'; div.id=`cond_${conditionCount}`;
+    const options = availableProps.map(p=>`<option value="${p}">${p}</option>`).join('');
+    div.innerHTML = `
+      <div class="prop-cell">
+        <select id="prop_${conditionCount}" onchange="updateRange(${conditionCount})">
+          <option value="">请选择属性</option>${options}
+        </select>
+        <span id="range_${conditionCount}" class="range-hint"></span>
+      </div>
+      <div class="num-field">
+        <input id="min_${conditionCount}" placeholder="最小值" onblur="validateInput(${conditionCount},'min')">
+        <div class="stepper">
+          <button class="step-btn" onclick="stepValue('min_${conditionCount}', 1)" type="button">+</button>
+          <button class="step-btn" onclick="stepValue('min_${conditionCount}', -1)" type="button">-</button>
+        </div>
+      </div>
+      <div class="num-field">
+        <input id="max_${conditionCount}" placeholder="最大值" onblur="validateInput(${conditionCount},'max')">
+        <div class="stepper">
+          <button class="step-btn" onclick="stepValue('max_${conditionCount}', 1)" type="button">+</button>
+          <button class="step-btn" onclick="stepValue('max_${conditionCount}', -1)" type="button">-</button>
+        </div>
+      </div>
+      <button class="btn btn-danger" onclick="removeCondition(${conditionCount})">删除</button>
+      <span class="error" id="error_${conditionCount}"></span>`;
+    document.getElementById('conditions').appendChild(div);
+    const minEl=document.getElementById(`min_${conditionCount}`), maxEl=document.getElementById(`max_${conditionCount}`);
+    if(minEl){ minEl.type='number'; minEl.step='any'; }
+    if(maxEl){ maxEl.type='number'; maxEl.step='any'; }
+  }
+  function removeCondition(id){ const propEl=document.getElementById(`prop_${id}`); if(propEl&&propEl.value) usedProperties.delete(propEl.value); document.getElementById(`cond_${id}`).remove(); }
+  function updateRange(id){
+    const propEl=document.getElementById(`prop_${id}`); if(!propEl.value) return;
+    const oldProp=propEl.getAttribute('data-prev'); if(oldProp&&oldProp!==propEl.value) usedProperties.delete(oldProp);
+    propEl.setAttribute('data-prev', propEl.value); usedProperties.add(propEl.value);
+    const rangeEl=document.getElementById(`range_${id}`); const r=properties[propEl.value];
+    rangeEl.innerText = r? `数据库范围：${r.min} ~ ${r.max}` : '';
+  }
+  function validateInput(id,type){
+    const propEl=document.getElementById(`prop_${id}`); if(!propEl||!propEl.value) return;
+    const valEl=document.getElementById(`${type}_${id}`); const errorEl=document.getElementById(`error_${id}`);
+    const txt=(valEl.value||'').trim(); if(txt===''){ hideError(errorEl); return; }
+    if(isNaN(txt)){ showError(errorEl, valEl, '请输入数字！'); valEl.value=''; return; }
+    const num=parseFloat(txt); const {min,max}=properties[propEl.value];
+    if(num<min){ valEl.value=min; showError(errorEl, valEl, `输入值过小，已修正为 ${min}`);} else if(num>max){ valEl.value=max; showError(errorEl, valEl, `输入值过大，已修正为 ${max}`);} else { hideError(errorEl); }
+  }
+  function showError(el, anchor, msg){ if(!el||!anchor) return; el.textContent=msg; const pr=anchor.closest('.condition').getBoundingClientRect(); const ar=anchor.getBoundingClientRect(); el.style.top=((ar.top-pr.top)+anchor.offsetHeight+6)+'px'; el.style.left=((ar.left-pr.left))+'px'; el.style.display='block'; clearTimeout(el._t); el._t=setTimeout(()=>hideError(el),2000); }
+  function hideError(el){ if(!el) return; el.style.display='none'; el.textContent=''; clearTimeout(el._t); }
+
+  function stepValue(id, delta){ const el=document.getElementById(id); if(!el) return; const v=parseFloat(el.value||'0')||0; el.value=String(v+delta); }
+
+  async function search(){
+    const thisSearchId=++lastSearchId;
+    selectedProperties=[]; let conditions=[];
+    for(let i=1;i<=conditionCount;i++){
+      const propEl=document.getElementById(`prop_${i}`); if(!propEl||!propEl.value) continue;
+      const range=properties[propEl.value]; if(!range) continue;
+      const minValEl=document.getElementById(`min_${i}`), maxValEl=document.getElementById(`max_${i}`);
+      const minVal = (minValEl.value||'').trim()===''? range.min : parseFloat(minValEl.value);
+      const maxVal = (maxValEl.value||'').trim()===''? range.max : parseFloat(maxValEl.value);
+      selectedProperties.push(propEl.value);
+      conditions.push({property: propEl.value, min:minVal, max:maxVal});
+    }
+    const resultsEl=document.getElementById('results'); const btn=document.getElementById('searchBtn');
+    resultsEl.innerHTML='<tr><td colspan="99" style="color: var(--text-muted); padding:24px;">正在查询，请稍候…</td></tr>';
+    if(btn) btn.disabled=true;
+    const res=await fetch(`/search?ts=${Date.now()}`,{method:'POST', cache:'no-store', headers:{'Content-Type':'application/json','Pragma':'no-cache','Cache-Control':'no-store'}, body: JSON.stringify({conditions})});
+    const j=await res.json(); if(thisSearchId!==lastSearchId) return;
+    allColumns=j.columns||[]; lastData=j.data||[]; window.__currentRow=null; selectedRowId=null;
+    if(!lastData || lastData.length===0){ resultsEl.innerHTML='<tr><td colspan="99" style="color: var(--text-muted); padding:24px;">暂无数据，调整筛选条件试试</td></tr>'; document.getElementById('pagination').innerHTML=''; if(btn) btn.disabled=false; updatePanelSummary(); return; }
+    visibleColumns=new Set(); selectedProperties.forEach(c=>{ if(c&&c!=='id'&&c!=='name') visibleColumns.add(c); }); if(visibleColumns.size===0){ allColumns.filter(c=>c!=='id'&&c!=='name').slice(0,4).forEach(c=>visibleColumns.add(c)); }
+    currentPage=1; renderTable(); renderPagination(); if(btn) btn.disabled=false; updatePanelSummary();
+  }
+
+  function renderTable(){
+    const resultsEl=document.getElementById('results');
+    const cols=['id','name',...Array.from(visibleColumns)];
+    const thead='<tr>'+cols.map(c=>`<th>${c}</th>`).join('')+'<th>操作</th></tr>';
+    const start=(currentPage-1)*pageSize; const pageRows=lastData.slice(start,start+pageSize);
+    const tbody = pageRows.map(row=>{
+      const tds = cols.map(c=>`<td>${row[c]??''}</td>`).join('');
+      const active=(row.id===selectedRowId)? ' class="row-active"' : '';
+      const act = `<td><button class=\"btn btn-sm\" onclick=\"addToCandidates(${row.id})\">候选</button></td>`;
+      return `<tr onclick=\"selectRowById(${row.id})\"${active}>${tds}${act}</tr>`;
+    }).join('');
+    resultsEl.innerHTML = thead + tbody;
+  }
+
+  function renderPagination(){ const total=lastData.length; const totalPages=Math.max(1,Math.ceil(total/pageSize)); const el=document.getElementById('pagination'); el.innerHTML = `<span>${total} 条 · 第 ${currentPage}/${totalPages} 页</span><button class=\"page-btn\" onclick=\"gotoPage(1)\" ${currentPage===1?'disabled':''}>首页</button><button class=\"page-btn\" onclick=\"gotoPage(${currentPage-1})\" ${currentPage===1?'disabled':''}>上一页</button><button class=\"page-btn\" onclick=\"gotoPage(${currentPage+1})\" ${currentPage===totalPages?'disabled':''}>下一页</button><button class=\"page-btn\" onclick=\"gotoPage(${totalPages})\" ${currentPage===totalPages?'disabled':''}>末页</button>`; }
+  function gotoPage(p){ const totalPages=Math.max(1,Math.ceil(lastData.length/pageSize)); currentPage=Math.min(Math.max(1,p),totalPages); renderTable(); renderPagination(); }
+  function selectRowById(id){ const row=lastData.find(r=>r.id===id); if(row) selectRow(row); }
+  function selectRow(row){ selectedRowId=row.id; window.__currentRow=row; const titleEl=document.getElementById('detailTitle'); titleEl.textContent=(row.name||'条目')+` (ID: ${row.id??''})`; renderDetailsFiltered(); renderTable(); updatePanelSummary(); }
+  function renderDetailsFiltered(){
+    const row=window.__currentRow; const grid=document.getElementById('detailGrid');
+    const filter=(document.getElementById('fieldFilter')?.value||'').toLowerCase().trim();
+    if(!row){ grid.innerHTML=''; return; }
+    const pinned=['name','id'];
+    const vis=Array.from(visibleColumns).filter(c=>!pinned.includes(c));
+    const others=allColumns.filter(c=>!pinned.includes(c)&&!vis.includes(c));
+    const ordered=[...pinned,...vis,...others];
+    grid.innerHTML = ordered
+      .filter(k=>{ if(!filter) return true; const v=row[k]; return (k.toLowerCase().includes(filter)||(v!=null&&String(v).toLowerCase().includes(filter))); })
+      .map((k,idx)=>{ const v=row[k]; const key=esc(k); const raw=(v==null?'':String(v)); const valHtml=(raw==='')? '<span class="muted">(空)</span>' : esc(raw); const i=idx+1; return `<div class=\"k\" data-row=\"${i}\" title=\"${key}\">${key}</div><div class=\"v\" data-row=\"${i}\" title=\"${esc(raw)}\">${valHtml}</div>`; })
+      .join('');
+  }
+  // Highlight key-value row on hover for better readability (event delegation)
+  (function(){ const grid=document.getElementById('detailGrid'); if(!grid) return; grid.addEventListener('mouseover', (e)=>{ const t=e.target&&e.target.closest&&e.target.closest('.k,.v'); if(!t||!t.dataset||!t.dataset.row) return; const n=t.dataset.row; grid.querySelectorAll(`[data-row="${n}"]`).forEach(el=>el.classList.add('row-hl')); }); grid.addEventListener('mouseout', (e)=>{ const t=e.target&&e.target.closest&&e.target.closest('.k,.v'); if(!t||!t.dataset||!t.dataset.row) return; const n=t.dataset.row; grid.querySelectorAll(`[data-row="${n}"]`).forEach(el=>el.classList.remove('row-hl')); }); })();
+  const esc=(s)=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  function copyDetail(btn){ const row=window.__currentRow; if(!row) return; const text=JSON.stringify(row,null,2); const done=()=>{ if(btn){ btn.disabled=true; const old=btn.textContent; btn.textContent='已复制'; setTimeout(()=>{ btn.disabled=false; btn.textContent=old; }, 1200); } }; if(navigator.clipboard&&window.isSecureContext){ navigator.clipboard.writeText(text).then(done); return;} const ta=document.createElement('textarea'); ta.value=text; document.body.appendChild(ta); ta.select(); try{ document.execCommand('copy'); done(); } finally { document.body.removeChild(ta); } }
+
+  function addToCandidates(id){ const row=lastData.find(r=>r.id===id); if(!row) return; if(!candidates.some(x=>x.id===id)){ candidates.push({id:row.id,name:row.name}); renderCandidates(); } }
+  function removeCandidate(id){ candidates=candidates.filter(c=>c.id!==id); renderCandidates(); }
+  function clearCandidates(){ candidates=[]; renderCandidates(); }
+  async function selectCandidateById(id){ const row=lastData.find(r=>r.id===id); if(row){ selectRow(row); return; } try{ const res=await fetch(`/item/${id}`,{headers:{'Cache-Control':'no-store'}}); if(!res.ok) throw new Error('not found'); const j=await res.json(); const data=j&&j.data; if(data){ selectedRowId=data.id; window.__currentRow=data; document.getElementById('detailTitle').textContent=(data.name||'条目')+` (ID: ${data.id??''})`; renderDetailsFiltered(); renderTable(); updatePanelSummary(); return; } }catch(e){ const el=document.getElementById('candList'); if(el){ el.classList.add('cand-hint'); setTimeout(()=>el.classList.remove('cand-hint'),600); } } }
+  function renderCandidates(){ const list=document.getElementById('candList'), cnt=document.getElementById('candCount'); if(!list||!cnt) return; cnt.textContent=`${candidates.length} 项`; if(candidates.length===0){ list.className='cand-list muted'; list.innerHTML='暂无候选，点击“候选”按钮收集条目'; return; } list.className='cand-list'; list.innerHTML = candidates.map(c=>{ const name=(c.name==null||c.name==='')? '(无名称)': String(c.name); const safe=name.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); return `<div class=\"cand-item\" title=\"ID: ${c.id}\"><button class=\"cand-main\" onclick=\"selectCandidateById(${c.id})\" title=\"查看详情\">#${c.id} · ${safe}</button><button class=\"cand-remove\" onclick=\"removeCandidate(${c.id})\" title=\"移除\">×</button></div>`; }).join(''); }
+
+  function enableCandidatesDrag(){ const panel=document.getElementById('candidatesPanel'); const handle=panel?panel.querySelector('.cand-header'):null; if(!panel||!handle) return; let isDown=false, sx=0, sy=0; const onDown=e=>{ isDown=true; const ev=e.touches?e.touches[0]:e; sx=ev.clientX; sy=ev.clientY; const r=panel.getBoundingClientRect(); panel.style.left=r.left+'px'; panel.style.top=r.top+'px'; panel.style.right='auto'; panel.style.bottom='auto'; panel.classList.add('dragging'); e.preventDefault(); }; const onMove=e=>{ if(!isDown) return; const ev=e.touches?e.touches[0]:e; const cl=parseFloat(panel.style.left||'0'); const ct=parseFloat(panel.style.top||'0'); const dx=ev.clientX-sx, dy=ev.clientY-sy; panel.style.left=(cl+dx)+'px'; panel.style.top=(ct+dy)+'px'; sx=ev.clientX; sy=ev.clientY; }; const onUp=()=>{ isDown=false; panel.classList.remove('dragging'); }; handle.addEventListener('mousedown',onDown); window.addEventListener('mousemove',onMove); window.addEventListener('mouseup',onUp); handle.addEventListener('touchstart',onDown,{passive:false}); window.addEventListener('touchmove',onMove,{passive:false}); window.addEventListener('touchend',onUp); }
+  function exportCandidates(){ if(!candidates||candidates.length===0){ alert('候选区为空'); return;} const ids=candidates.map(c=>c.id).join(','); const a=document.createElement('a'); a.href=`/export?ids=${encodeURIComponent(ids)}`; a.download=''; document.body.appendChild(a); a.click(); document.body.removeChild(a); }
+
+  function openColumnModal(){ const list=document.getElementById('columnsList'); const cols=allColumns.filter(c=>c!=='id'&&c!=='name'); list.innerHTML = cols.map(c=>{ const checked=visibleColumns.has(c)? 'checked':''; return `<label><input type=\"checkbox\" id=\"col_${c}\" ${checked}> ${c}</label>`; }).join(''); document.getElementById('colModal').classList.add('open'); document.getElementById('colModalOverlay').style.display='block'; }
+  function closeColumnModal(){ document.getElementById('colModal').classList.remove('open'); document.getElementById('colModalOverlay').style.display='none'; }
+  function selectAllColumns(flag){ const cols=allColumns.filter(c=>c!=='id'&&c!=='name'); cols.forEach(c=>{ const el=document.getElementById(`col_${c}`); if(el) el.checked=!!flag; }); }
+  function applyColumnSelection(){ const cols=allColumns.filter(c=>c!=='id'&&c!=='name'); visibleColumns=new Set(); cols.forEach(c=>{ const el=document.getElementById(`col_${c}`); if(el&&el.checked) visibleColumns.add(c); }); closeColumnModal(); renderTable(); }
+
+  function updatePanelSummary(){ const el=document.getElementById('panelSummary'); const total=(dbTotal==null)? '未知': dbTotal; const res=(lastData&&lastData.length!=null)? lastData.length:0; const dbLabel=(currentDb==='main')?'主库':(currentDb==='user'?'用户库':'临时库'); el.innerHTML=`当前：${dbLabel} · 数据库总条目：${total} · 搜索结果条目：${res}`; }
+  function toggleTheme(){ const key='dm-app-theme'; const cur=document.documentElement.className||'titanium'; const next=(cur==='titanium')?'default':'titanium'; document.documentElement.className=next; try{ localStorage.setItem(key,next);}catch(e){} document.getElementById('themeBtn').textContent='切换主题'; }
+  (function(){ const btn=document.getElementById('themeBtn'); if(btn) btn.textContent='切换主题'; })();
+
+  function onDbSelectChange(sel){ if(!sel) return; const v=sel.value; if(v==='upload'){ const fi=document.getElementById('dbUpload'); if(!fi) return; fi.value=''; fi.onchange=async()=>{ if(!fi.files||fi.files.length===0) return; const fd=new FormData(); fd.append('file', fi.files[0]); sel.disabled=true; try{ const res=await fetch('/db/upload',{method:'POST', body:fd}); const j=await res.json(); if(!res.ok){ alert(j&&j.error? j.error:'上传失败'); sel.value=currentDb; return;} currentDb=(j&&j.current)||'user'; await reloadAllAfterDbSwitch(); } finally { sel.disabled=false; } }; fi.click(); return; } (async()=>{ sel.disabled=true; try{ const res=await fetch('/db/select',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({db:v})}); const j=await res.json(); if(!res.ok){ alert(j&&j.error? j.error:'切换失败'); sel.value=currentDb; return;} currentDb=v; await reloadAllAfterDbSwitch(); } finally { sel.disabled=false; } })(); }
+  async function reloadAllAfterDbSwitch(){ document.getElementById('conditions').innerHTML=''; conditionCount=0; usedProperties=new Set(); selectedProperties=[]; visibleColumns=new Set(); allColumns=[]; lastData=[]; selectedRowId=null; dbTotal=null; await loadProperties(); updatePanelSummary(); }
+
+  enableCandidatesDrag();
+  loadProperties();
+  </script>
+</body>
+</html>

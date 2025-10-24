@@ -1,0 +1,8 @@
+id,name,density(g/cm3),elastic_modulus(GPa),yield_strength(MPa),tensile_strength(MPa),elongation(%),shear_strength(MPa),fracture_toughness(MPa·m^1/2),creep_limit(MPa)
+1,Ti-6Al-4V,4.43,113.8,880,950,14,480,84,400
+2,Ti-6Al-4V ELI,4.43,113.8,790,860,15,480,107,400
+3,Ti-6Al-4V Annealed,4.43,113.8,827,896,15,480,97,400
+4,Ti-6Al-2Sn-4Zr-2Mo,4.43,120,1050,1110,13,485,111,550
+5,Ti-5Al-2.5Sn,4.43,110,827,861,15,480,97,400
+6,Ti-3Al-2.5V,4.43,100,530,620,20,440,70,350
+7,Ti-8Al-1Mo-1V,4.43,124,910,937,18,500,120,430
